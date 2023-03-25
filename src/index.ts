@@ -1,134 +1,77 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import discord, { Events, GatewayIntentBits, Partials, User } from 'discord.js';
-import './assert-env-vars';
+import discord, { ChannelType, GatewayIntentBits, Partials } from 'discord.js';
+import dotenv from 'dotenv';
+import fs from 'fs';
 
-import { FeatureFile } from './types';
-import { isJsOrTsFile } from './utils';
-import { slashCommands, contextMenuCommands } from './commands';
-
-const INTRO_CHANNEL_ID = '766393115044216854';
-const VERIFIED_ROLE = '930202099264938084';
+dotenv.config();
 
 if (!process.env.DISCORD_BOT_TOKEN) {
   throw new Error('No bot token found!');
+}
+
+const saveMessage = async (message: discord.Message, parentChannel?: discord.BaseGuildTextChannel) => {
+  let directory = `messages/${parentChannel ? `${parentChannel.id}/` : ''}${message.channel.id}`;
+  if (!fs.existsSync(directory)) {
+    fs.mkdirSync(directory);
+  }
+
+  fs.writeFileSync(
+    `${directory}/${message.id}.json`, 
+    JSON.stringify(message, null, 4)
+  );
+}
+
+const getMessageHistory = async (channel: discord.AnyThreadChannel | discord.BaseGuildTextChannel, parentChannel?: discord.BaseGuildTextChannel) => {
+  let message = await channel.messages
+    .fetch({ limit: 1 })
+    .then(messagePage => {
+      messagePage.forEach(msg => saveMessage(msg, parentChannel));
+      return messagePage.size === 1 ? messagePage.at(0) : null;
+    });
+
+  while (message) {
+    await channel.messages
+      .fetch({ limit: 100, before: message.id })
+      .then(messagePage => {
+        messagePage.forEach(msg => saveMessage(msg, parentChannel));
+        message = 0 < messagePage.size ? messagePage.at(messagePage.size - 1) : null;
+      })
+  }
 }
 
 const client = new discord.Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMessageReactions,
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-const features: FeatureFile[] = [];
-const featureFiles = fs
-  .readdirSync(path.resolve(__dirname, './features'))
-  // Look for files as TS (dev) or JS (built files)
-  .filter(isJsOrTsFile);
 
-for (const featureFile of featureFiles) {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const feature = require(`./features/${featureFile}`) as FeatureFile;
-  features.push(feature);
-}
-
-client.on('ready', () => {
+client.on('ready', async () => {
   console.log(`Logged in as ${client.user?.tag}!`);
-  features.forEach((f) => f.onStartup?.(client));
+  
+  let guilds = await client.guilds.fetch();
+  for (let guild of guilds) {
+    let server = await client.guilds.fetch(guild[1].id);
+    let channels = await server.channels.fetch();
+    
+    for (let channel of channels) {
+      if (channel[1]?.type == ChannelType.GuildText) {
+        getMessageHistory(channel[1]);
+
+        let threads = await channel[1].threads.fetch();
+        for (let thread of threads.threads) {
+          getMessageHistory(thread[1], channel[1]);
+        }
+      }
+    }
+  }
 });
 
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (interaction.isChatInputCommand()) {
-    slashCommands
-      .find((c) => c.data.name === interaction.commandName)
-      ?.execute(interaction);
-  }
-
-  if (interaction.isMessageContextMenuCommand()) {
-    contextMenuCommands
-      .find((c) => c.data.name === interaction.commandName)
-      ?.execute(interaction);
-  }
-});
-
-client.on('messageCreate', (message) => {
+client.on('messageCreate', (message: any) => {
   if (message.author.bot) return;
-
-  // if user types into the intros channel, give them the verified role
-  if (message.channel.id == INTRO_CHANNEL_ID) {
-    message.member?.roles
-      .add(VERIFIED_ROLE)
-      .catch((err) => console.log(err.message, 'Verify'));
-  }
-
-  features.forEach((f) => f.onMessage?.(client, message));
-});
-
-client.on('messageReactionAdd', async (reaction, user) => {
-  if (user.partial) {
-    try {
-      await user.fetch();
-    } catch (error) {
-      console.log('Error while trying to fetch an user', error);
-    }
-  }
-
-  if (reaction.message.partial) {
-    try {
-      await reaction.message.fetch();
-    } catch (error) {
-      console.log('Error while trying to fetch a reaction message', error);
-    }
-  }
-
-  if (reaction.partial) {
-    try {
-      const fetchedReaction = await reaction.fetch();
-      features.forEach((f) =>
-        f.onReactionAdd?.(client, fetchedReaction, user as User)
-      );
-    } catch (error) {
-      console.log('Error while trying to fetch a reaction', error);
-    }
-  } else {
-    features.forEach((f) => f.onReactionAdd?.(client, reaction, user as User));
-  }
-});
-
-client.on('messageReactionRemove', async (reaction, user) => {
-  if (user.partial) {
-    try {
-      await user.fetch();
-    } catch (error) {
-      console.log('Error while trying to fetch an user', error);
-    }
-  }
-
-  if (reaction.message.partial) {
-    try {
-      await reaction.message.fetch();
-    } catch (error) {
-      console.log('Error while trying to fetch a reaction message', error);
-    }
-  }
-
-  if (reaction.partial) {
-    try {
-      const fetchedReaction = await reaction.fetch();
-      features.forEach((f) =>
-        f.onReactionRemove?.(client, fetchedReaction, user as User)
-      );
-    } catch (error) {
-      console.log('Error while trying to fetch a reaction', error);
-    }
-  } else {
-    features.forEach((f) =>
-      f.onReactionRemove?.(client, reaction, user as User)
-    );
-  }
+  
+  console.log('message:', message);
 });
 
 // Wake up 🤖
